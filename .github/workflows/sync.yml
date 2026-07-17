@@ -1,0 +1,25 @@
+name: sync
+on:
+  schedule:
+      - cron: '0 8 * * *'
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: sync
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          ref: "master"
+          fetch-depth: 0
+      - name: Fetch upstream and Rebase
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/v2fly/domain-list-community.git
+          git fetch upstream master
+          git rebase upstream/master
+          git push origin master --force
