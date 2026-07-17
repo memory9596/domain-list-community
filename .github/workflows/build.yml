@@ -1,14 +1,11 @@
 name: Build dlc.dat
 on:
+  workflow_dispatch:
   push:
     branches:
       - master
     paths-ignore:
       - "**/README.md"
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
 
 jobs:
   build:
@@ -28,11 +25,10 @@ jobs:
           go-version-file: code/go.mod
           cache-dependency-path: code/go.sum
 
-      - name: Set variables
+      - name: Add gfwlist
         run: |
-          echo "RELEASE_NAME=$(date +%Y%m%d%H%M%S)" >> $GITHUB_ENV
-          echo "TAG_NAME=$(date +%Y%m%d%H%M%S)" >> $GITHUB_ENV
-        shell: bash
+          cd code || exit 1
+          curl -fsSL https://github.com/memory9596/gfwlist2dnsmasq/raw/refs/heads/master/gfwlist2dnsmasq.sh | bash -s -- -l -o ./data/gfw
 
       - name: Build dlc.dat and plain lists
         run: |
@@ -41,34 +37,56 @@ jobs:
           go run ./cmd/datdump/main.go --inputdata=../dlc.dat --outputdir=../ --exportlists=_all_
           cd ../ && rm -rf code
 
-      - name: Generate dlc.dat sha256 hash
-        run: |
-          sha256sum dlc.dat > dlc.dat.sha256sum
-          sha256sum dlc.dat_plain.yml > dlc.dat_plain.yml.sha256sum
-
-      - name: Generate Zip
-        run: |
-          zip -9 dlc.dat.zip dlc.dat
-          sha256sum dlc.dat.zip > dlc.dat.zip.sha256sum
-
-      - name: Generate XZ
-        run: |
-          xz -z -9 -k dlc.dat
-          sha256sum dlc.dat.xz > dlc.dat.xz.sha256sum
-
       - name: Git push assets to "release" branch
         run: |
           git init
           git config --local user.name "github-actions[bot]"
           git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -b release
-          git add *.txt *.sha256sum dlc.dat dlc.dat_plain.yml dlc.dat.zip dlc.dat.xz
-          git commit -m "${{ env.RELEASE_NAME }}"
+          git add dlc.dat dlc.dat_plain.yml
+          git commit -m "Auto-update"
           git remote add origin "https://${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}"
           git push -f -u origin release
 
-      - name: Release and upload assets
-        run: |
-          gh release create ${{ env.TAG_NAME }} --generate-notes --latest --title ${{ env.RELEASE_NAME }} ./dlc.dat ./dlc.dat.* ./dlc.dat_plain.yml ./dlc.dat_plain.yml.*
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Custom clean up workflow runs
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const { owner, repo } = context.repo
+            const runs = await github.paginate(github.rest.actions.listWorkflowRunsForRepo, {
+              owner,
+              repo,
+              per_page: 100
+            })
+            const now = new Date()
+            console.log(now.toLocaleString('sv-SE'))
+            const todayStr = now.toLocaleDateString('sv-SE')
+            const yesterday = new Date(now)
+            yesterday.setDate(yesterday.getDate() - 1)
+            const yesterdayStr = yesterday.toLocaleDateString('sv-SE')
+            const allowedDays = [todayStr, yesterdayStr]
+            const keptRuns = new Set()
+            for (const run of runs) {
+              const dateString = new Date(run.created_at).toLocaleDateString('sv-SE')
+              const cacheKey = `${run.workflow_id}-${dateString}`
+              if (!allowedDays.includes(dateString)) {
+                console.log(`[Delete] Run ${run.id} (${run.name}, ${dateString}) - Older than 2 days`)
+                try {
+                  await github.rest.actions.deleteWorkflowRun({ owner, repo, run_id: run.id })
+                } catch (e) {
+                  console.log(`Skipped or failed: ${e.message}`)
+                }
+                continue
+              }
+              if (keptRuns.has(cacheKey)) {
+                console.log(`[Delete] Run ${run.id} (${run.name}, ${dateString}) - Not the latest for this date`)
+                try {
+                  await github.rest.actions.deleteWorkflowRun({ owner, repo, run_id: run.id })
+                } catch (e) {
+                  console.log(`Skipped or failed (possibly running): ${e.message}`)
+                }
+              } else {
+                console.log(`[Retain] Run ${run.id} (${run.name}, ${dateString}) - Latest for this date`)
+                keptRuns.add(cacheKey)
+              }
+            }
